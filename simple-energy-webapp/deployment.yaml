@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-energy-app
+  namespace: test-temp
+  labels:
+    app: simple-energy-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simple-energy-app
+  template:
+    metadata:
+      labels:
+        app: simple-energy-app
+    spec:
+      containers:
+      - name: simple-energy-container
+        image: 392698013629.dkr.ecr.us-east-1.amazonaws.com/test-temp:v1
+        ports:
+        - containerPort: 5000
+

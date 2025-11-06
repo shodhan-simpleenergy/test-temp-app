@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: simple-energy-service
+  namespace: test-temp 
+spec:
+  type: ClusterIP
+  selector:
+    app: simple-energy-app
+  ports:
+  - port: 80
+    targetPort: 5000
+
