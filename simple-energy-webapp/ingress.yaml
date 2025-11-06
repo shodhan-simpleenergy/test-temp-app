@@ -1,10 +1,10 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: simple-energy-ingress
+  name: simple-energy-test-ingress
   namespace: test-temp
 spec:
-  ingressClassName: nginx   # Modern way instead of deprecated annotation
+  ingressClassName: nginx
   rules:
     - host: simpleenergy.local
       http:
@@ -13,7 +13,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: simple-energy-service   # Your service name
+                name: simple-energy-test-service
                 port:
                   number: 5000              # Must match service targetPort
 

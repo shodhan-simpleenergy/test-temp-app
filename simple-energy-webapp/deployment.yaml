@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simple-energy-app
+  name: simple-energy-test-app
   namespace: test-temp
   labels:
     app: simple-energy-app
