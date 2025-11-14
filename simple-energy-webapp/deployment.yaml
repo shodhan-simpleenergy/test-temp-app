@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: simple-energy-container
-        image: 392698013629.dkr.ecr.us-east-1.amazonaws.com/test-temp:v1.1.3-rc.32
+        image: 392698013629.dkr.ecr.us-east-1.amazonaws.com/test-temp:v21.1.3-rc.1
         ports:
         - containerPort: 5000
 
