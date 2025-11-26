@@ -1,0 +1,248 @@
+pipeline {
+    agent any
+
+    environment {
+        GIT_USERNAME = 'shodhan-simpleenergy'
+        GIT_PASSWORD = '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'
+        GIT_URL = 'https://$GIT_USERNAME:$GIT_PASSWORD@github.com/shodhan-simpleenergy/test-temp-app.git'
+        ECR_REPO_NAME = '392698013629.dkr.ecr.us-east-1.amazonaws.com/test-temp'
+        K8S_NAMESPACE = 'test-temp'
+        AWS_REGION = 'us-east-1'
+        EKS_CLUSTER_NAME = 'simpleenergy-dev-eks-cluster'
+        AWS_CRED_ID = 'test-aws-service-account-temp'
+        GOOGLE_CHAT_WEBHOOK = 'https://chat.googleapis.com/v1/spaces/AAQAaaqQhEM/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=iSg5BALjvXrZHFIkUK4eYEPYby0cOdMP460dRlF51mI'
+        BUILD_NAME = 'test-temp-jenkins'
+        STAGE_NAME = 'AWS stage'
+    }
+
+    stages {
+
+        stage('Clone Git Repository') {
+            steps {
+                script {
+                    try {
+                        if (fileExists('test-temp-app')) {
+                            sh 'rm -rf test-temp-app'
+                        }
+                        sh "git clone $GIT_URL -b release/step"
+                    } catch (Exception e) {
+                        sendFailureNotification("Clone Git Repository", e.message)
+                        throw e
+                    }
+                }
+            }
+        }
+
+        stage('Check Branch') {
+            steps {
+                dir('test-temp-app') {
+                    script {
+                        try {
+                            def currentBranch = sh(script: "git rev-parse --abbrev-ref HEAD", returnStdout: true).trim()
+                            echo "Current branch in repo: ${currentBranch}"
+                            if (currentBranch != 'release/step') {
+                                error "This pipeline can only run on the release/step branch!"
+                            }
+                        } catch (Exception e) {
+                            sendFailureNotification("Check Branch", e.message)
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Versioning') {
+            steps {
+                dir('test-temp-app') {
+                    script {
+                        try {
+                            // Extract tag from webhook payload
+                            env.GIT_TAG = extractTagFromWebhook()
+                            
+                            if (!env.GIT_TAG) {
+                                error "No tag found in webhook payload. Please ensure the build was triggered by a tag push event."
+                            }
+
+                            echo "Tag from webhook: ${env.GIT_TAG}"
+
+                            // Fetch tags
+                            sh "git fetch --tags"
+
+                            // Verify tag exists
+                            def tagExists = sh(
+                                script: "git tag -l ${env.GIT_TAG}",
+                                returnStdout: true
+                            ).trim()
+
+                            if (!tagExists) {
+                                error "Tag ${env.GIT_TAG} does not exist in the repository."
+                            }
+
+                            // Validate tag format: v<major>.<minor>.<patch>-rc.<number>
+                            if (!(env.GIT_TAG ==~ /^v\d+\.\d+\.\d+-rc\.\d+$/)) {
+                                error "Invalid tag format: ${env.GIT_TAG}. Use format v<major>.<minor>.<patch>-rc.<number>."
+                            }
+
+                            echo "Validated Git tag: ${env.GIT_TAG}"
+
+                            // Check if Docker image already exists in ECR using AWS credentials
+                            def imageExists = sh(
+                                script: """
+                                aws ecr describe-images --repository-name ${ECR_REPO_NAME.split('/').last()} \
+                                --region $AWS_REGION --image-ids imageTag=${env.GIT_TAG} >/dev/null 2>&1 && echo "true" || echo "false"
+                                """,
+                                returnStdout: true
+                            ).trim()
+
+                            if (imageExists == "true") {
+                                error "Docker image with tag ${env.GIT_TAG} already exists in ECR. Pipeline aborted."
+                            }
+                        } catch (Exception e) {
+                            sendFailureNotification("Versioning", e.message)
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                dir('test-temp-app/simple-energy-webapp') {
+                    script {
+                        try {
+                            sh "docker build -t $ECR_REPO_NAME:${env.GIT_TAG} ."
+                        } catch (Exception e) {
+                            sendFailureNotification("Build Docker Image", e.message)
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                script {
+                    try {
+                        sh '''
+                            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO_NAME
+                        '''
+                    } catch (Exception e) {
+                        sendFailureNotification("Login to ECR", e.message)
+                        throw e
+                    }
+                }
+            }
+        }
+
+        stage('Push Docker Image to ECR') {
+            steps {
+                script {
+                    try {
+                        sh "docker push $ECR_REPO_NAME:${env.GIT_TAG}"
+                        sh 'docker logout $ECR_REPO_NAME'
+                    } catch (Exception e) {
+                        sendFailureNotification("Push Docker Image to ECR", e.message)
+                        throw e
+                    }
+                }
+            }
+        }
+
+        stage('Update Deployment YAML') {
+            steps {
+                dir('test-temp-app/simple-energy-webapp') {
+                    script {
+                        try {
+                            sh """
+                            sed -i 's|image: .*|image: $ECR_REPO_NAME:${env.GIT_TAG}|g' deployment.yaml
+                            """
+                            sh """
+                            git config user.name "shodhan"
+                            git config user.email "shodhan@simpleenergy.in"
+                            git add deployment.yaml
+                            git commit -m "Update deployment.yaml with image tag ${env.GIT_TAG}"
+                            git push origin release/step
+                            """
+                        } catch (Exception e) {
+                            sendFailureNotification("Update Deployment YAML", e.message)
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Setup EKS Kubeconfig') {
+            steps {
+                script {
+                    try {
+                        sh '''
+                            aws eks --region $AWS_REGION update-kubeconfig --name $EKS_CLUSTER_NAME
+                        '''
+                    } catch (Exception e) {
+                        sendFailureNotification("Setup EKS Kubeconfig", e.message)
+                        throw e
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                dir('test-temp-app/simple-energy-webapp') {
+                    script {
+                        try {
+                            sh "kubectl apply -f deployment.yaml -n ${K8S_NAMESPACE}"
+                            sh "kubectl apply -f service.yaml -n ${K8S_NAMESPACE}"
+                            sh "kubectl apply -f ingress.yaml -n ${K8S_NAMESPACE}"
+                        } catch (Exception e) {
+                            sendFailureNotification("Deploy to Kubernetes", e.message)
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                sh """
+                curl -X POST -H 'Content-Type: application/json' \
+                -d '{"text":"BUILD SUCCESS\\nBuild: ${BUILD_NAME}\\nStage Build Number: #${BUILD_NUMBER} - version: ${env.GIT_TAG}\\nWorks Successfully."}' \
+                "${GOOGLE_CHAT_WEBHOOK}"
+                """
+            }
+        }
+        failure {
+            script {
+                sh """
+                curl -X POST -H 'Content-Type: application/json' \
+                -d '{"text":"BUILD FAILED\\nBuild: ${BUILD_NAME}\\nStage Build Number: #${BUILD_NUMBER} - version: ${env.GIT_TAG ?: 'N/A'}\\nPipeline execution failed. Check individual stage notifications for details."}' \
+                "${GOOGLE_CHAT_WEBHOOK}"
+                """
+            }
+        }
+    }
+}
+
+// Helper function to send failure notifications only
+def sendFailureNotification(String stageName, String errorMessage) {
+    sh """
+    curl -X POST -H 'Content-Type: application/json' \
+    -d '{"text":"❌ STAGE FAILED\\n\\nBuild: ${BUILD_NAME}\\nStage: ${stageName}\\nVersion: ${env.GIT_TAG ?: 'N/A'}\\nError: ${errorMessage.replaceAll('"', '\\"')}"}' \
+    "${GOOGLE_CHAT_WEBHOOK}"
+    """
+}
+
+// Helper function to extract tag from webhook payload (Generic Webhook Trigger)
+def extractTagFromWebhook() {
+    if (env.ref && env.ref.startsWith('refs/tags/')) {
+        return env.ref.replaceFirst('refs/tags/', '')
+    }
+    return null
+}
